@@ -1,0 +1,134 @@
+# Storm Data Analysis
+Sheryl Harshberger  
+August 3, 2017  
+
+#Health and Damage Analysis Using Storm Data  
+
+The assignment asked us to answer two questions based on data from the NOAA storm database.  The first question was what type of weather related event causes the most damage to health as measured by injuries and death?  The second question was what type of weather related event causes the most economic damage?  We were allowed to choose how to define economic damage from the table.  I chose to define it as the combination of property damage and crop damage.  
+
+##Data Processing
+
+###Reading in the data  
+
+First I needed to get the data to work with.  Reading the comma separated value file in was fairly straightforward.  When I went to read in the events I discovered reading in from a PDF is not so simple.  I tried using read_lines and the PDFtools package, but neither worked.  I either got a long list of errors or it read in gibberish.  So I found an old solution to reading PDF's into R using an outside converter.  This worked.  The URL for the outside code and an explanation of how to use it is in the comments of the code.
+
+
+```r
+library(readr)
+library(tm)
+library(dplyr)
+library(lubridate)
+library(stringdist)
+library(ggplot2)
+```
+
+
+```r
+url <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+download.file(url, destfile = "StormData", mode = "wb")
+stormdata <- read.csv("StormData", header = TRUE, as.is = c(2))
+
+docurl <- "https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf"
+download.file(docurl, destfile = "StrmDoc.pdf", mode = "wb")
+file <- "StormDoc.pdf"  # I tried using the pdftools package but only got gibberish
+Rpdf <- readPDF(control = list(text = "-layout"))
+# This method uses the outside converter "pdftotext"
+# The converter must be found in the working directory for this file
+# The converter can be found at http://www.foolabs.com/xpdf/download.html
+corpus <- VCorpus(URISource(file), readerControl = list(reader = Rpdf))
+stormdoc <- content(content(corpus)[[1]])
+events <- stormdoc[125:208]
+```
+
+###Cleaning up the data  
+
+Now that I had the data, I needed to clean it up.  The list of events comes into R with lots of additional symbol characters, so first I needed to clean it up a bit.  Here I removed the other characters so that eventlist only contains the characters in the events and not the other numbers and symbols.  The last step changes the events to all caps to provide a better result for the match that takes place later.  
+
+
+```r
+index <- grep("\\([CMZ]\\)", events)
+eventlist <- events[index]
+eventlist <- gsub("^[^[:alpha:]]+","", eventlist)
+eventlist <- gsub("([a-zA-Z ]+) \\(.*", "\\1", eventlist)
+eventlist <- toupper(eventlist)
+```
+
+Then I changed the beginning dates in the data set to POSIXct objects so I can work with them as dates. 
+
+```r
+stormdata$BGN_DATE <- mdy_hms(stormdata$BGN_DATE)
+```
+
+I created the data frame multiplyer as a look up table for the values in the two EXP vectors.  That allowed me to convert the unusual values in those columns to their numeric equivalent, which I can then multiply with the value in the respective damage vector.  This process resulted in the creation of two new columns in stormdata that each contain the damage value for the event for either property or crops.  Then I used the look up table to associate the appropriate values with the symbols stored in the two EXP fields.  
+
+
+```r
+multiplyer <- data.frame(abbr = levels(stormdata$PROPDMGEXP), 
+                         value = c(1, 1, 1, 1, 1, 10, 100, 1000, 10000, 100000, 1000000,
+                                   10000000, 100000000, 1000000000, 100, 100, 1000, 1000000, 1000000))
+
+stormdata$PROPDMGEXP <- multiplyer$value[match(stormdata$PROPDMGEXP, multiplyer$abbr)]
+stormdata$CROPDMGEXP <- multiplyer$value[match(stormdata$CROPDMGEXP, multiplyer$abbr)]
+```
+
+Next was the resolution of the spelling errors in the event type field.  A glance through the data showed me that they all should match something in the list of events. I found that the "dl"" method gave me the best initial match and then I worked with the maximum distance until they all resolved.  
+
+
+```r
+matchindex <- amatch(stormdata$EVTYPE, eventlist, method = "dl", maxDist = 20)
+stormdata$events <- eventlist[matchindex]
+```
+
+Finally I used the dplyr functions to get the specified data, after 1995, and the columns needed to answer the questions.  I created two new fields, one for the combined death and injuries and the other for the combined property and crop damage.  Then I grouped all of the data by the event type and used summarize to find the maximums for each event type.
+
+
+```r
+cleansd <- stormdata %>%
+     filter(BGN_DATE > 1996-01-01) %>%
+     filter(!(FATALITIES == 0 & INJURIES == 0 & PROPDMG == 0 & CROPDMG == 0)) %>%
+     select(events, FATALITIES, INJURIES, PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP) %>%
+     mutate(morbandmort = FATALITIES + INJURIES, 
+            propdmg = PROPDMG * PROPDMGEXP, cropdmg = CROPDMG * CROPDMGEXP) %>%
+     select(events, morbandmort, propdmg, cropdmg) %>%
+     mutate(damage = propdmg + cropdmg) %>%
+     group_by(events) %>%
+     summarise(health = max(morbandmort), damage = max(damage))
+```
+
+##Results  
+
+I thought it would be informative to see the maximums with respect to each other and so I have chosen to graph the maximums for health impact and property damage for each event.
+
+###Population Health
+
+From the graph below we can see that the event type with the most impact on health per event is tornado, but it is closely followed by ice storm.  Focusing resources on education and mitigation strategies for these two types of events would go a long way toward reducing injury and death due to weather events.
+
+
+```r
+ggplot(cleansd, aes(x = reorder(events, -health), y = health)) +
+     geom_col(fill = "blue") +
+     theme_bw() +
+     theme(text = element_text(size=7), 
+           axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+     labs(x = "Events", y = "Number of Deaths and Injuries", 
+          title = "Health Impact by Event Type")
+```
+
+![](StormDataAnalysis_files/figure-html/healthviz-1.png)<!-- -->
+
+### Economic Damage
+
+From the graph below we can see that the event type with the most impact on economic damage per event is flood by a considerable margin.  Flood mitigation alone would help reduce the impact of weather events on economic loss.
+
+
+```r
+ggplot(data = subset(cleansd, !is.na(damage)), aes(x = reorder(events, -damage), y = damage)) +
+     geom_col(fill = "green") +
+     theme_bw() +
+     theme(text = element_text(size=7), 
+           axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+     labs(x = "Events", y = "Economic Damage to Property and Crops", 
+          title = "Economic Damage by Event Type")
+```
+
+![](StormDataAnalysis_files/figure-html/damageviz-1.png)<!-- -->
